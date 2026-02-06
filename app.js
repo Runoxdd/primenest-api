@@ -11,18 +11,12 @@ import assistantRoute from "./routes/assistant.route.js";
 
 const app = express();
 
-// We allow BOTH localhost (for you) and the future Vercel URL (for the world)
-const allowedOrigins = [process.env.CLIENT_URL, "http://localhost:5173"];
-
+// Use a simple, clean CORS configuration
 app.use(cors({ 
-  origin: function (origin, callback) {
-    if (!origin || allowedOrigins.indexOf(origin) !== -1) {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS'));
-    }
-  }, 
-  credentials: true 
+  origin: process.env.CLIENT_URL || "http://localhost:5173",
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"]
 }));
 
 app.use(express.json());
@@ -36,7 +30,6 @@ app.use("/api/chats", chatRoute);
 app.use("/api/messages", messageRoute);
 app.use("/api/assistant", assistantRoute);
 
-// Render will provide a PORT environment variable. If not, use 8800.
 const PORT = process.env.PORT || 8800;
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}!`);
