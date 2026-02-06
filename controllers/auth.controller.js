@@ -7,10 +7,7 @@ export const register = async (req, res) => {
 
   try {
     // HASH THE PASSWORD
-
     const hashedPassword = await bcrypt.hash(password, 10);
-
-    console.log(hashedPassword);
 
     // CREATE A NEW USER AND SAVE TO DB
     const newUser = await prisma.user.create({
@@ -20,8 +17,6 @@ export const register = async (req, res) => {
         password: hashedPassword,
       },
     });
-
-    console.log(newUser);
 
     res.status(201).json({ message: "User created successfully" });
   } catch (err) {
@@ -35,7 +30,6 @@ export const login = async (req, res) => {
 
   try {
     // CHECK IF THE USER EXISTS
-
     const user = await prisma.user.findUnique({
       where: { username },
     });
@@ -43,15 +37,12 @@ export const login = async (req, res) => {
     if (!user) return res.status(400).json({ message: "Invalid Credentials!" });
 
     // CHECK IF THE PASSWORD IS CORRECT
-
     const isPasswordValid = await bcrypt.compare(password, user.password);
 
     if (!isPasswordValid)
       return res.status(400).json({ message: "Invalid Credentials!" });
 
     // GENERATE COOKIE TOKEN AND SEND TO THE USER
-
-    // res.setHeader("Set-Cookie", "test=" + "myValue").json("success")
     const age = 1000 * 60 * 60 * 24 * 7;
 
     const token = jwt.sign(
@@ -68,7 +59,8 @@ export const login = async (req, res) => {
     res
       .cookie("token", token, {
         httpOnly: true,
-        // secure:true,
+        secure: true,     // MUST BE TRUE FOR VERCEL
+        sameSite: "none",   // MUST BE NONE FOR CROSS-SITE
         maxAge: age,
       })
       .status(200)
@@ -80,5 +72,12 @@ export const login = async (req, res) => {
 };
 
 export const logout = (req, res) => {
-  res.clearCookie("token").status(200).json({ message: "Logout Successful" });
+  res
+    .clearCookie("token", {
+      httpOnly: true,
+      secure: true,     // MUST MATCH LOGIN SETTINGS
+      sameSite: "none",
+    })
+    .status(200)
+    .json({ message: "Logout Successful" });
 };
