@@ -5,7 +5,6 @@ import prisma from "../lib/prisma.js";
 
 dotenv.config();
 
-// Reverting to your exact initialization style
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
@@ -13,72 +12,81 @@ export const chatWithAssistant = async (req, res) => {
   const { message } = req.body;
 
   try {
-    // 1. EXTRACT LOCATION (Groq)
-    const extraction = await groq.chat.completions.create({
+    // --- 1. RESTORE INTENT DETECTION (The "Smart" part) ---
+    const intentCompletion = await groq.chat.completions.create({
       messages: [
-        { role: "system", content: "Extract city or country. Return ONLY the name. If none, return 'none'." },
+        {
+          role: "system",
+          content: "Categorize the query into one word: 'search', 'advice', or 'greeting'. Also, if it is a 'search', extract the location (e.g. 'Japan') after the word. Example: 'search Japan' or 'greeting none'."
+        },
         { role: "user", content: message }
       ],
-      model: "llama-3.1-8b-instant",
+      model: "llama-3.1-8b-instant", 
       temperature: 0.1,
     });
 
-    const location = extraction.choices[0]?.message?.content?.trim() || "none";
+    const intentRaw = intentCompletion.choices[0]?.message?.content?.toLowerCase() || "greeting none";
+    const topIntent = intentRaw.includes("search") ? "search" : (intentRaw.includes("advice") ? "advice" : "greeting");
+    
+    // Extract location from the intent string
+    const location = intentRaw.split(" ").slice(1).join(" ") || "none";
 
-    // 2. CHECK DATABASE
+    // --- 2. CHECK DATABASE (Only if searching) ---
     let postCount = 0;
-    if (location.toLowerCase() !== "none") {
+    if (topIntent === "search" && location !== "none") {
       const posts = await prisma.post.findMany({
         where: {
           OR: [
             { city: { contains: location, mode: 'insensitive' } },
-            { country: { contains: location, mode: 'insensitive' } }
+            { country: { contains: location, mode: 'insensitive' } },
+            { address: { contains: location, mode: 'insensitive' } }
           ]
         }
       });
       postCount = posts.length;
     }
 
-    // 3. GENERATE CONTENT (Using your ORIGINAL model syntax)
+    // --- 3. GENERATE RESPONSE (Back to your original format) ---
+    const systemInstruction = `
+      You are "Runo," the global PrimeNest advisor.
+      Intent: ${topIntent}
+      Database: ${postCount} listings found in ${location}.
+
+      MANDATORY JSON FORMAT:
+      {"reply": "...", "searchUrl": "...", "explanation": "..."}
+
+      LOGIC:
+      - If greeting/advice: searchUrl is null.
+      - If search: 
+          - If postCount > 0: "I found ${postCount} houses in ${location}!" searchUrl: "/list?city=${location}"
+          - If postCount is 0: "I checked, but we have no listings in ${location} right now." searchUrl: null
+    `;
+
     const result = await ai.models.generateContent({
-      model: "gemini-2.5-flash", // Using the correct version for this SDK
+      model: "gemini-2.0-flash-exp", 
       contents: message,
       config: {
-        systemInstruction: `
-          You are "Runo," the official AI for PrimeNest. 
-          DATABASE STATUS: Found ${postCount} houses in ${location}.
-          
-          MANDATORY FORMAT: Return ONLY a JSON object.
-          {"reply": "...", "searchUrl": "...", "explanation": "..."}
-
-          LOGIC:
-          - If postCount is 0, say you found nothing in ${location}.
-          - If postCount > 0, provide the link.
-        `,
+        systemInstruction: systemInstruction,
+        temperature: 0.7,
       },
     });
 
-    // Extracting the text like you did before
     const responseText = result.text;
     const jsonMatch = responseText.match(/\{[\s\S]*\}/);
     
     if (jsonMatch) {
       const parsedData = JSON.parse(jsonMatch[0]);
-      if (postCount > 0 && location !== "none") {
-        parsedData.searchUrl = `/list?city=${location}`;
-      } else if (postCount === 0) {
-        parsedData.searchUrl = null;
-      }
       res.status(200).json(parsedData);
     } else {
-      throw new Error("JSON Parse Error");
+      throw new Error("Formatting Error");
     }
 
   } catch (err) {
     console.error("Assistant Error:", err);
     res.status(200).json({
-      reply: "I'm having a connection issue. Please try again!",
-      searchUrl: null
+      reply: "Hi! I'm Runo. How can I help you today?",
+      searchUrl: null,
+      explanation: "Safe fallback."
     });
   }
 };
