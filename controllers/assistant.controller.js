@@ -1,11 +1,11 @@
-import { GoogleGenAI } from "@google/genai"; // New unified SDK
+import { GoogleGenAI } from "@google/genai";
 import Groq from "groq-sdk";
 import dotenv from "dotenv";
 import prisma from "../lib/prisma.js";
 
 dotenv.config();
 
-// Initialize with the new SDK format
+// Reverting to your exact initialization style
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
@@ -39,38 +39,45 @@ export const chatWithAssistant = async (req, res) => {
       postCount = posts.length;
     }
 
-    // 3. GENERATE RESPONSE (New SDK Syntax: ai.models.generateContent)
-    const response = await ai.models.generateContent({
-      model: "gemini-1.5-flash",
-      contents: [{ role: "user", parts: [{ text: message }] }],
+    // 3. GENERATE CONTENT (Using your ORIGINAL model syntax)
+    const result = await ai.models.generateContent({
+      model: "gemini-2.5-flash", // Using the correct version for this SDK
+      contents: message,
       config: {
-        responseMimeType: "application/json",
         systemInstruction: `
           You are "Runo," the official AI for PrimeNest. 
           DATABASE STATUS: Found ${postCount} houses in ${location}.
-          you give nice short responses and is wiling to give advices on houses 
-          RULES:
-          1. If post count is 0, say: "I checked our database, but there are no houses in ${location} right now."
-          2. If post count > 0, say: "I found ${postCount} listings in ${location}!"
-          3. Return JSON: {"reply": "...", "searchUrl": "...", "explanation": "..."}
-          4. If post count is 0, set searchUrl to null.
+          
+          MANDATORY FORMAT: Return ONLY a JSON object.
+          {"reply": "...", "searchUrl": "...", "explanation": "..."}
+
+          LOGIC:
+          - If postCount is 0, say you found nothing in ${location}.
+          - If postCount > 0, provide the link.
         `,
       },
     });
 
-    // The new SDK returns data directly in response.text
-    const parsedData = JSON.parse(response.text);
-
-    if (postCount > 0 && location !== "none") {
-      parsedData.searchUrl = `/list?city=${location}`;
+    // Extracting the text like you did before
+    const responseText = result.text;
+    const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+    
+    if (jsonMatch) {
+      const parsedData = JSON.parse(jsonMatch[0]);
+      if (postCount > 0 && location !== "none") {
+        parsedData.searchUrl = `/list?city=${location}`;
+      } else if (postCount === 0) {
+        parsedData.searchUrl = null;
+      }
+      res.status(200).json(parsedData);
+    } else {
+      throw new Error("JSON Parse Error");
     }
-
-    res.status(200).json(parsedData);
 
   } catch (err) {
     console.error("Assistant Error:", err);
     res.status(200).json({
-      reply: "Runo's data stream is interrupted. Please try again.",
+      reply: "I'm having a connection issue. Please try again!",
       searchUrl: null
     });
   }
