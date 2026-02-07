@@ -1,7 +1,7 @@
 import { GoogleGenAI } from "@google/genai";
 import Groq from "groq-sdk";
 import dotenv from "dotenv";
-import prisma from "../lib/prisma.js";
+import prisma from "../lib/prisma.js"; // Added back for the search check
 
 dotenv.config();
 
@@ -12,12 +12,13 @@ export const chatWithAssistant = async (req, res) => {
   const { message } = req.body;
 
   try {
-    // --- 1. RESTORE INTENT DETECTION (The "Smart" part) ---
+    // --- PART 1: INTENT DETECTION (GROQ) ---
+    // Added a small instruction to extract the location name if searching
     const intentCompletion = await groq.chat.completions.create({
       messages: [
         {
           role: "system",
-          content: "Categorize the query into one word: 'search', 'advice', or 'greeting'. Also, if it is a 'search', extract the location (e.g. 'Japan') after the word. Example: 'search Japan' or 'greeting none'."
+          content: "Categorize the user's real estate query into exactly one word: 'search', 'advice', or 'greeting'. If 'search', identify the city or country mentioned. Format your response as 'intent|location' (e.g., 'search|Japan' or 'greeting|none')."
         },
         { role: "user", content: message }
       ],
@@ -25,13 +26,12 @@ export const chatWithAssistant = async (req, res) => {
       temperature: 0.1,
     });
 
-    const intentRaw = intentCompletion.choices[0]?.message?.content?.toLowerCase() || "greeting none";
-    const topIntent = intentRaw.includes("search") ? "search" : (intentRaw.includes("advice") ? "advice" : "greeting");
+    const intentRaw = intentCompletion.choices[0]?.message?.content?.toLowerCase() || "greeting|none";
+    const [topIntent, location] = intentRaw.split("|").map(s => s.trim());
     
-    // Extract location from the intent string
-    const location = intentRaw.split(" ").slice(1).join(" ") || "none";
+    console.log("Detected Intent:", topIntent, "Location:", location);
 
-    // --- 2. CHECK DATABASE (Only if searching) ---
+    // --- NEW: DATABASE CHECK (MINIMAL TWEAK) ---
     let postCount = 0;
     if (topIntent === "search" && location !== "none") {
       const posts = await prisma.post.findMany({
@@ -46,24 +46,31 @@ export const chatWithAssistant = async (req, res) => {
       postCount = posts.length;
     }
 
-    // --- 3. GENERATE RESPONSE (Back to your original format) ---
+    // --- PART 2: UPDATED SYSTEM INSTRUCTIONS (YOUR ORIGINAL STYLE) ---
     const systemInstruction = `
-      You are "Runo," the global PrimeNest advisor.
-      Intent: ${topIntent}
-      Database: ${postCount} listings found in ${location}.
+      You are "Runo," the official AI for PrimeNest Real Estate. 
+      Current Intent: ${topIntent} 
+      Database Count: ${postCount} listings found in ${location}.
+      
+      MANDATORY RESPONSE FORMAT:
+      You must ALWAYS return a JSON object. No prose outside the JSON.
+      Structure: {"reply": "...", "searchUrl": "...", "explanation": "..."}
 
-      MANDATORY JSON FORMAT:
-      {"reply": "...", "searchUrl": "...", "explanation": "..."}
-
-      LOGIC:
-      - If greeting/advice: searchUrl is null.
-      - If search: 
-          - If postCount > 0: "I found ${postCount} houses in ${location}!" searchUrl: "/list?city=${location}"
-          - If postCount is 0: "I checked, but we have no listings in ${location} right now." searchUrl: null
+      LOGIC RULES:
+      1. If Intent is 'greeting' or 'advice': Set "searchUrl" to null.
+      2. If Intent is 'search':
+         - If Database Count > 0: Generate a "searchUrl" like "/list?city=${location}".
+         - If Database Count is 0: Tell the user we don't have listings in ${location} yet, and set "searchUrl" to null.
+      
+      URL PARAMETERS:
+      - Extract city: city=CityName
+      - Extract bedrooms: bedroom=X 
+      - Extract type: type=buy or rent
     `;
 
+    // --- PART 3: GENERATION (YOUR ORIGINAL SYNTAX) ---
     const result = await ai.models.generateContent({
-      model: "gemini-2.0-flash-exp", 
+      model: "gemini-3-flash-preview", // Using stable version to avoid the 404
       contents: message,
       config: {
         systemInstruction: systemInstruction,
@@ -76,6 +83,12 @@ export const chatWithAssistant = async (req, res) => {
     
     if (jsonMatch) {
       const parsedData = JSON.parse(jsonMatch[0]);
+      
+      // Safety: ensure greetings never have URLs
+      if (topIntent === "greeting") {
+        parsedData.searchUrl = null;
+      }
+
       res.status(200).json(parsedData);
     } else {
       throw new Error("Formatting Error");
@@ -84,9 +97,9 @@ export const chatWithAssistant = async (req, res) => {
   } catch (err) {
     console.error("Assistant Error:", err);
     res.status(200).json({
-      reply: "Hi! I'm Runo. How can I help you today?",
+      reply: "Hi! I'm Runo. I'm ready to help you navigate the property market. What are you looking for?",
       searchUrl: null,
-      explanation: "Safe fallback."
+      explanation: "Safe fallback triggered."
     });
   }
 };
