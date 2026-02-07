@@ -1,24 +1,22 @@
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI } from "@google/genai"; // New unified SDK
 import Groq from "groq-sdk";
 import dotenv from "dotenv";
 import prisma from "../lib/prisma.js";
 
 dotenv.config();
 
-const ai = new GoogleGenAI(process.env.GEMINI_API_KEY); // Simplified init
+// Initialize with the new SDK format
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 export const chatWithAssistant = async (req, res) => {
   const { message } = req.body;
 
   try {
-    // 1. EXTRACT LOCATION
+    // 1. EXTRACT LOCATION (Groq)
     const extraction = await groq.chat.completions.create({
       messages: [
-        {
-          role: "system",
-          content: "Extract the location. Return ONLY the location name. If none, return 'none'."
-        },
+        { role: "system", content: "Extract city or country. Return ONLY the name. If none, return 'none'." },
         { role: "user", content: message }
       ],
       model: "llama-3.1-8b-instant",
@@ -34,35 +32,34 @@ export const chatWithAssistant = async (req, res) => {
         where: {
           OR: [
             { city: { contains: location, mode: 'insensitive' } },
-            { country: { contains: location, mode: 'insensitive' } },
-            { address: { contains: location, mode: 'insensitive' } }
+            { country: { contains: location, mode: 'insensitive' } }
           ]
         }
       });
       postCount = posts.length;
     }
 
-    // 3. GENERATE RESPONSE
-    const model = ai.getGenerativeModel({ model: "gemini-1.5-flash" });
-    
-    const systemInstruction = `
-      You are "Runo," the official AI for PrimeNest. 
-      CURRENT DATABASE STATUS: Found ${postCount} houses in ${location}.
-      
-      RULES:
-      1. If post count is 0, say: "I checked our database, but there are no houses in ${location} right now."
-      2. If post count > 0, say: "I found ${postCount} listings in ${location}!"
-      3. Format as JSON: {"reply": "...", "searchUrl": "...", "explanation": "..."}
-      4. If post count is 0, set searchUrl to null.
-    `;
-
-    const result = await model.generateContent({
+    // 3. GENERATE RESPONSE (New SDK Syntax: ai.models.generateContent)
+    const response = await ai.models.generateContent({
+      model: "gemini-1.5-flash",
       contents: [{ role: "user", parts: [{ text: message }] }],
-      generationConfig: { responseMimeType: "application/json" },
-      systemInstruction: systemInstruction,
+      config: {
+        responseMimeType: "application/json",
+        systemInstruction: `
+          You are "Runo," the official AI for PrimeNest. 
+          DATABASE STATUS: Found ${postCount} houses in ${location}.
+          you give nice short responses and is wiling to give advices on houses 
+          RULES:
+          1. If post count is 0, say: "I checked our database, but there are no houses in ${location} right now."
+          2. If post count > 0, say: "I found ${postCount} listings in ${location}!"
+          3. Return JSON: {"reply": "...", "searchUrl": "...", "explanation": "..."}
+          4. If post count is 0, set searchUrl to null.
+        `,
+      },
     });
 
-    const parsedData = JSON.parse(result.response.text());
+    // The new SDK returns data directly in response.text
+    const parsedData = JSON.parse(response.text);
 
     if (postCount > 0 && location !== "none") {
       parsedData.searchUrl = `/list?city=${location}`;
@@ -74,8 +71,7 @@ export const chatWithAssistant = async (req, res) => {
     console.error("Assistant Error:", err);
     res.status(200).json({
       reply: "Runo's data stream is interrupted. Please try again.",
-      searchUrl: null,
-      explanation: "Fallback triggered."
+      searchUrl: null
     });
   }
 };
