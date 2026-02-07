@@ -13,7 +13,7 @@ const app = express();
 
 // Use a simple, clean CORS configuration
 app.use(cors({ 
- origin: true, // This tells the server to accept the request from whatever origin is calling it
+  origin: "https://primenest-client.vercel.app", // NO trailing slash
   credentials: true,
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"]
