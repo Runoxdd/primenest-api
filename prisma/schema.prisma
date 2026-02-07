@@ -20,6 +20,7 @@ model Post {
   images     String[]
   address    String
   city       String
+  country    String?     // <--- ADD THIS LINE
   bedroom    Int
   bathroom   Int
   latitude   String
@@ -32,6 +33,7 @@ model Post {
   postDetail PostDetail?
   savedPosts SavedPost[]
 }
+
 
 enum Type {
   buy

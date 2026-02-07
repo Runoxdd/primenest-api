@@ -1,27 +1,25 @@
 import prisma from "../lib/prisma.js";
 import jwt from "jsonwebtoken";
+import axios from "axios"; // Ensure axios is installed in your backend
 
-// GET ALL POSTS (With Lenient Search)
-// GET ALL POSTS (With Lenient Search & Price Fix)
+// GET ALL POSTS (With Improved "AI" Search)
 export const getPosts = async (req, res) => {
   const query = req.query;
 
   try {
     const posts = await prisma.post.findMany({
       where: {
-        city: query.city 
-          ? { 
-              contains: query.city, 
-              mode: 'insensitive' 
-            } 
-          : undefined,
+        // This OR logic allows searching "USA" to find posts in Springfield, USA
+        OR: query.city ? [
+          { city: { contains: query.city, mode: 'insensitive' } },
+          { country: { contains: query.city, mode: 'insensitive' } },
+          { address: { contains: query.city, mode: 'insensitive' } }
+        ] : undefined,
         type: query.type || undefined,
         property: query.property || undefined,
         bedroom: parseInt(query.bedroom) || undefined,
         price: {
-          // If minPrice is 0 or missing, start from 0
           gte: parseInt(query.minPrice) || 0,
-          // FIX: If maxPrice is 0 or missing, set it to a huge number so it doesn't filter anything
           lte: (parseInt(query.maxPrice) > 0) ? parseInt(query.maxPrice) : 100000000,
         },
       },
@@ -34,7 +32,7 @@ export const getPosts = async (req, res) => {
   }
 };
 
-// GET SINGLE POST (With Async Saved Status Check)
+// GET SINGLE POST
 export const getPost = async (req, res) => {
   const id = req.params.id;
   try {
@@ -54,7 +52,6 @@ export const getPost = async (req, res) => {
     if (!post) return res.status(404).json({ message: "Post not found" });
 
     const token = req.cookies?.token;
-
     if (token) {
       try {
         const payload = jwt.verify(token, process.env.JWT_SECRET_KEY);
@@ -71,7 +68,6 @@ export const getPost = async (req, res) => {
         return res.status(200).json({ ...post, isSaved: false });
       }
     }
-    
     return res.status(200).json({ ...post, isSaved: false });
   } catch (err) {
     console.log(err);
@@ -79,15 +75,30 @@ export const getPost = async (req, res) => {
   }
 };
 
-// ADD POST
+// ADD POST (With Automatic Country Detection)
 export const addPost = async (req, res) => {
   const body = req.body;
   const tokenUserId = req.userId;
 
   try {
+    const { latitude, longitude } = body.postData;
+    let country = "";
+
+    // Automatic Country Lookup via Latitude/Longitude
+    try {
+      const geoRes = await axios.get(
+        `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=10`,
+        { headers: { "User-Agent": "PrimeNest-App" } }
+      );
+      country = geoRes.data.address.country || "";
+    } catch (geoErr) {
+      console.log("Geocoding failed, creating post without country info.");
+    }
+
     const newPost = await prisma.post.create({
       data: {
         ...body.postData,
+        country: country, // Storing the detected country
         userId: tokenUserId,
         postDetail: {
           create: body.postDetail,
@@ -111,7 +122,7 @@ export const updatePost = async (req, res) => {
   }
 };
 
-// DELETE POST (With Relation Cleanup)
+// DELETE POST
 export const deletePost = async (req, res) => {
   const id = req.params.id;
   const tokenUserId = req.userId;
@@ -122,30 +133,14 @@ export const deletePost = async (req, res) => {
       include: { postDetail: true } 
     });
 
-    if (!post) {
-      return res.status(404).json({ message: "Post not found!" });
-    }
+    if (!post) return res.status(404).json({ message: "Post not found!" });
+    if (post.userId !== tokenUserId) return res.status(403).json({ message: "Not Authorized!" });
 
-    if (post.userId !== tokenUserId) {
-      return res.status(403).json({ message: "Not Authorized!" });
-    }
-
-    // 1. Delete PostDetail first to satisfy DB constraints
     if (post.postDetail) {
-      await prisma.postDetail.delete({
-        where: { postId: id },
-      });
+      await prisma.postDetail.delete({ where: { postId: id } });
     }
-
-    // 2. Delete SavedPost records
-    await prisma.savedPost.deleteMany({
-      where: { postId: id },
-    });
-
-    // 3. Delete the main Post
-    await prisma.post.delete({
-      where: { id },
-    });
+    await prisma.savedPost.deleteMany({ where: { postId: id } });
+    await prisma.post.delete({ where: { id } });
 
     res.status(200).json({ message: "Post deleted successfully" });
   } catch (err) {
