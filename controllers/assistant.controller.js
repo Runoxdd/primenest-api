@@ -8,7 +8,76 @@ dotenv.config();
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
-// Retry utility function
+// ============================================
+// CONVERSATION SESSION MANAGEMENT
+// ============================================
+
+// In-memory session storage (consider Redis for production)
+const conversationSessions = new Map();
+
+// Session configuration
+const SESSION_CONFIG = {
+  maxHistoryLength: 20,      // Keep last 20 messages for context
+  sessionTimeout: 30 * 60 * 1000, // 30 minutes
+  maxSessions: 1000          // Maximum concurrent sessions
+};
+
+// Clean up expired sessions periodically
+setInterval(() => {
+  const now = Date.now();
+  for (const [sessionId, session] of conversationSessions.entries()) {
+    if (now - session.lastActivity > SESSION_CONFIG.sessionTimeout) {
+      conversationSessions.delete(sessionId);
+    }
+  }
+}, 5 * 60 * 1000); // Clean every 5 minutes
+
+// Get or create session context
+const getSessionContext = (sessionId) => {
+  if (!conversationSessions.has(sessionId)) {
+    // Enforce session limit
+    if (conversationSessions.size >= SESSION_CONFIG.maxSessions) {
+      // Remove oldest session
+      const oldestKey = conversationSessions.keys().next().value;
+      conversationSessions.delete(oldestKey);
+    }
+    
+    conversationSessions.set(sessionId, {
+      history: [],
+      lastIntent: null,
+      lastLocation: null,
+      preferences: {
+        propertyType: null,
+        priceRange: null,
+        bedrooms: null,
+        locations: []
+      },
+      createdAt: Date.now(),
+      lastActivity: Date.now()
+    });
+  }
+  
+  const session = conversationSessions.get(sessionId);
+  session.lastActivity = Date.now();
+  return session;
+};
+
+// Update session context
+const updateSessionContext = (sessionId, updates) => {
+  const session = conversationSessions.get(sessionId);
+  if (session) {
+    Object.assign(session, updates);
+    // Trim history if too long
+    if (session.history.length > SESSION_CONFIG.maxHistoryLength) {
+      session.history = session.history.slice(-SESSION_CONFIG.maxHistoryLength);
+    }
+  }
+};
+
+// ============================================
+// RETRY UTILITY
+// ============================================
+
 const retryWithBackoff = async (fn, maxRetries = 3, baseDelay = 1000) => {
   let lastError;
   
@@ -28,89 +97,133 @@ const retryWithBackoff = async (fn, maxRetries = 3, baseDelay = 1000) => {
   throw lastError;
 };
 
-// Intent detection with improved parsing
-const detectIntent = async (message) => {
+// ============================================
+// INTENT DETECTION WITH CONTEXT
+// ============================================
+
+const detectIntent = async (message, context) => {
+  const contextHint = context.lastLocation 
+    ? `Previous location mentioned: ${context.lastLocation}` 
+    : '';
+  
   const intentCompletion = await groq.chat.completions.create({
     messages: [
       {
         role: "system",
-        content: `Categorize the user's real estate query. Respond in this EXACT format: "intent|location"
+        content: `Analyze the user's real estate query with conversation context.
         
-Examples:
-- "houses in Japan" → "search|Japan"
-- "apartments for rent in Lagos" → "search|Lagos"
-- "I want to buy property in London" → "search|London"
-- "hello" → "greeting|none"
-- "how are you" → "greeting|none"
-- "what's the best area to invest" → "advice|none"
-- "tips for first time buyers" → "advice|none"
+${contextHint}
 
-Rules:
-- Intent must be exactly: search, advice, or greeting
-- Location is the city/country mentioned, or "none" if not applicable
-- Be consistent with the format`
+Categorize the query and extract information. Respond in this EXACT JSON format:
+{
+  "intent": "search|advice|greeting|follow_up|clarification",
+  "location": "city/country name or null",
+  "propertyType": "apartment|house|condo|land|any",
+  "priceRange": {"min": number, "max": number} or null,
+  "bedrooms": number or null,
+  "action": "buy|rent|any"
+}
+
+Intent Types:
+- search: User wants to find properties
+- advice: User wants real estate advice/tips
+- greeting: User is saying hello/starting conversation
+- follow_up: User is asking about previous results
+- clarification: User is refining their search
+
+Examples:
+- "houses in Japan" → {"intent":"search","location":"Japan","propertyType":"house",...}
+- "apartments for rent in Lagos under 5 million" → {"intent":"search","location":"Lagos","propertyType":"apartment","priceRange":{"min":0,"max":5000000},"action":"rent"}
+- "show me more" → {"intent":"follow_up",...}
+- "what about 2 bedrooms?" → {"intent":"clarification","bedrooms":2,...}
+- "hello" → {"intent":"greeting",...}`
       },
       { role: "user", content: message }
     ],
     model: "llama-3.1-8b-instant",
     temperature: 0.1,
+    response_format: { type: "json_object" }
   });
 
-  const rawResponse = intentCompletion.choices[0]?.message?.content?.toLowerCase() || "greeting|none";
-  
-  // Parse with multiple fallback patterns
-  const patterns = [
-    /^(\w+)\|(.+)$/,           // Standard format: intent|location
-    /^(\w+)\s*[\:\-]\s*(.+)$/, // Alternative: intent: location or intent - location
-    /^(\w+)\s+in\s+(.+)$/,     // Natural: search in Japan
-  ];
-
-  for (const pattern of patterns) {
-    const match = rawResponse.match(pattern);
-    if (match) {
-      const intent = match[1].trim();
-      const location = match[2].trim();
-      
-      // Validate intent
-      if (['search', 'advice', 'greeting'].includes(intent)) {
-        return { intent, location: location === 'none' ? null : location };
-      }
-    }
-  }
-
-  // Fallback: check for keywords in the original message
-  const lowerMessage = message.toLowerCase();
-  if (lowerMessage.includes('house') || lowerMessage.includes('apartment') || 
-      lowerMessage.includes('property') || lowerMessage.includes('rent') ||
-      lowerMessage.includes('buy') || lowerMessage.includes('find')) {
-    // Try to extract location from message
-    const locationMatch = lowerMessage.match(/(?:in|at|near)\s+([a-zA-Z\s]+)/);
-    return { 
-      intent: 'search', 
-      location: locationMatch ? locationMatch[1].trim() : null 
+  try {
+    const response = JSON.parse(intentCompletion.choices[0]?.message?.content || '{}');
+    return {
+      intent: response.intent || 'greeting',
+      location: response.location || null,
+      propertyType: response.propertyType || 'any',
+      priceRange: response.priceRange || null,
+      bedrooms: response.bedrooms || null,
+      action: response.action || 'any'
     };
+  } catch (e) {
+    console.error("Intent parsing error:", e);
+    return { intent: 'greeting', location: null };
   }
-
-  return { intent: 'greeting', location: null };
 };
 
-// Database query with connection warming
-const searchListings = async (location) => {
-  if (!location) return { count: 0, posts: [] };
+// ============================================
+// DATABASE SEARCH
+// ============================================
 
+const searchListings = async (filters) => {
+  const { location, propertyType, priceRange, bedrooms, action } = filters;
+  
   try {
-    // Ensure connection is active
     await prisma.$connect();
     
-    const posts = await prisma.post.findMany({
-      where: {
+    const where = { AND: [] };
+    
+    // Location filter
+    if (location) {
+      where.AND.push({
         OR: [
           { city: { contains: location, mode: 'insensitive' } },
           { country: { contains: location, mode: 'insensitive' } },
           { address: { contains: location, mode: 'insensitive' } }
         ]
+      });
+    }
+    
+    // Property type filter
+    if (propertyType && propertyType !== 'any') {
+      where.AND.push({ property: propertyType });
+    }
+    
+    // Price range filter
+    if (priceRange) {
+      const priceCondition = {};
+      if (priceRange.min) priceCondition.gte = priceRange.min;
+      if (priceRange.max) priceCondition.lte = priceRange.max;
+      if (Object.keys(priceCondition).length > 0) {
+        where.AND.push({ price: priceCondition });
+      }
+    }
+    
+    // Bedrooms filter
+    if (bedrooms) {
+      where.AND.push({ bedroom: { gte: bedrooms } });
+    }
+    
+    // Action (buy/rent) filter
+    if (action && action !== 'any') {
+      where.AND.push({ type: action });
+    }
+    
+    const posts = await prisma.post.findMany({
+      where: where.AND.length > 0 ? where : undefined,
+      select: { 
+        id: true, 
+        title: true, 
+        city: true, 
+        country: true,
+        price: true,
+        bedroom: true,
+        bathroom: true,
+        property: true,
+        type: true,
+        images: true
       },
-      select: { id: true, title: true, city: true, country: true }
+      take: 10
     });
 
     return { count: posts.length, posts };
@@ -120,68 +233,87 @@ const searchListings = async (location) => {
   }
 };
 
-export const chatWithAssistant = async (req, res) => {
-  const { message } = req.body;
+// ============================================
+// RESPONSE GENERATION
+// ============================================
 
-  if (!message || !message.trim()) {
-    return res.status(400).json({
-      reply: "Please provide a message.",
-      searchUrl: null,
-    });
+const generateResponse = async (message, context, sessionId, searchResults, intentData) => {
+  // Build conversation history for context
+  const conversationHistory = context.history.map(m => ({
+    role: m.role,
+    parts: [{ text: m.content }]
+  }));
+  
+  // Add current message
+  conversationHistory.push({
+    role: 'user',
+    parts: [{ text: message }]
+  });
+  
+  const systemInstruction = `
+You are "Runo," PrimeNest's expert AI real estate consultant. You are the pride and joy of the website - professional, knowledgeable, and genuinely helpful.
+
+PERSONALITY:
+- Warm and approachable, like a knowledgeable friend
+- Expert in real estate markets, trends, and advice
+- Proactive in understanding user needs
+- Remember conversation context and build on it
+- Concise but thorough (aim for 2-3 sentences unless more detail is needed)
+
+CURRENT CONTEXT:
+- Session ID: ${sessionId}
+- Previous Intent: ${context.lastIntent || 'None'}
+- Previous Location: ${context.lastLocation || 'None'}
+- User Preferences: ${JSON.stringify(context.preferences)}
+- Current Intent: ${intentData.intent}
+- Detected Location: ${intentData.location || 'Not specified'}
+- Property Type: ${intentData.propertyType}
+- Search Results Found: ${searchResults.count}
+
+SEARCH RESULTS:
+${searchResults.count > 0 ? 
+  searchResults.posts.map((p, i) => `${i + 1}. ${p.title} - ${p.city}, ${p.country} (${p.bedroom} bed, ${p.bathroom} bath) - ${p.type === 'rent' ? 'Rent' : 'Sale'}`).join('\n') 
+  : 'No listings found matching criteria'}
+
+RESPONSE GUIDELINES:
+
+1. GREETING: Be warm and inviting. Introduce yourself briefly and ask how you can help.
+
+2. ADVICE: Share helpful real estate insights. Be specific and actionable.
+
+3. SEARCH with results: Celebrate finding options! Mention the count and highlight 1-2 interesting properties.
+
+4. SEARCH without results: Be empathetic. Suggest alternatives or ask clarifying questions.
+
+5. FOLLOW_UP: Reference previous conversation naturally. "Looking at those ${context.lastLocation} properties again..."
+
+6. CLARIFICATION: Acknowledge the refinement and show updated results.
+
+Always end with a helpful follow-up question or suggestion to keep the conversation flowing naturally.
+
+RESPONSE FORMAT (JSON only):
+{
+  "reply": "Your conversational response",
+  "searchUrl": "/list?city=Location" or null,
+  "suggestions": ["suggestion 1", "suggestion 2"],
+  "preferences": {
+    "propertyType": "updated type or null",
+    "priceRange": {"min": number, "max": number} or null,
+    "bedrooms": number or null,
+    "locations": ["location1", "location2"]
   }
+}
+`;
 
   try {
-    // Step 1: Detect intent with retry
-    const { intent, location } = await retryWithBackoff(
-      () => detectIntent(message),
-      3,
-      500
-    );
-    
-    console.log(`Intent: ${intent}, Location: ${location || 'none'}`);
-
-    // Step 2: Search database if needed
-    let searchResults = { count: 0, posts: [] };
-    if (intent === 'search' && location) {
-      searchResults = await searchListings(location);
-      console.log(`Found ${searchResults.count} listings in ${location}`);
-    }
-
-    // Step 3: Generate response
-    const systemInstruction = `
-      You are "Runo," the official AI assistant for PrimeNest Real Estate.
-      
-      Current Context:
-      - User Intent: ${intent}
-      - Location Mentioned: ${location || 'Not specified'}
-      - Listings Found: ${searchResults.count}
-      
-      RESPONSE FORMAT (JSON only, no other text):
-      {
-        "reply": "Your helpful response to the user",
-        "searchUrl": "/list?city=LocationName" or null,
-        "suggestions": ["suggestion1", "suggestion2"] (optional)
-      }
-      
-      RULES:
-      1. If intent is 'greeting': Be friendly, introduce yourself, ask how you can help. Set searchUrl to null.
-      2. If intent is 'advice': Provide helpful real estate advice. Set searchUrl to null.
-      3. If intent is 'search':
-         - If listings found > 0: Confirm you found listings and provide searchUrl
-         - If listings found = 0: Apologize that no listings were found in that location, suggest alternatives
-         - searchUrl format: "/list?city=${encodeURIComponent(location || '')}"
-      
-      TONE: Professional, helpful, concise. Keep responses under 100 words.
-    `;
-
     const result = await retryWithBackoff(
       () => ai.models.generateContent({
         model: "gemini-2.0-flash",
-        contents: message,
+        contents: conversationHistory,
         config: {
           systemInstruction: systemInstruction,
           temperature: 0.7,
-          maxOutputTokens: 500,
+          maxOutputTokens: 800,
         },
       }),
       2,
@@ -194,29 +326,154 @@ export const chatWithAssistant = async (req, res) => {
     if (jsonMatch) {
       const parsedData = JSON.parse(jsonMatch[0]);
       
-      // Safety checks
-      if (intent === 'greeting' || intent === 'advice') {
-        parsedData.searchUrl = null;
+      // Build search URL if applicable
+      if (intentData.intent === 'search' && intentData.location) {
+        const params = new URLSearchParams();
+        params.set('city', intentData.location);
+        if (intentData.propertyType && intentData.propertyType !== 'any') {
+          params.set('property', intentData.propertyType);
+        }
+        if (intentData.bedrooms) {
+          params.set('bedroom', intentData.bedrooms);
+        }
+        if (intentData.priceRange) {
+          params.set('minPrice', intentData.priceRange.min || 0);
+          params.set('maxPrice', intentData.priceRange.max || 10000000);
+        }
+        parsedData.searchUrl = `/list?${params.toString()}`;
       }
       
-      // Ensure searchUrl is properly formatted
-      if (parsedData.searchUrl && location) {
-        parsedData.searchUrl = `/list?city=${encodeURIComponent(location)}`;
+      // Update session with AI-extracted preferences
+      if (parsedData.preferences) {
+        const session = getSessionContext(sessionId);
+        session.preferences = { ...session.preferences, ...parsedData.preferences };
+        if (intentData.location && !session.preferences.locations.includes(intentData.location)) {
+          session.preferences.locations.push(intentData.location);
+        }
       }
-
-      res.status(200).json(parsedData);
+      
+      return parsedData;
     } else {
       throw new Error("Invalid response format");
     }
+  } catch (err) {
+    console.error("Response generation error:", err);
+    return {
+      reply: "I'm here to help you find your perfect property! Could you tell me more about what you're looking for?",
+      searchUrl: null,
+      suggestions: ["Show me apartments in Lagos", "Find houses under ₦5M", "2 bedroom flats for rent"]
+    };
+  }
+};
+
+// ============================================
+// MAIN CHAT HANDLER
+// ============================================
+
+export const chatWithAssistant = async (req, res) => {
+  const { message, sessionId } = req.body;
+
+  if (!message || !message.trim()) {
+    return res.status(400).json({
+      reply: "Please provide a message.",
+      searchUrl: null,
+    });
+  }
+
+  // Generate or use existing session ID
+  const sid = sessionId || `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+  try {
+    // Get or create session context
+    const context = getSessionContext(sid);
+    
+    // Add user message to history
+    context.history.push({ role: 'user', content: message });
+    
+    // Step 1: Detect intent with context
+    const intentData = await retryWithBackoff(
+      () => detectIntent(message, context),
+      3,
+      500
+    );
+    
+    console.log(`[${sid}] Intent: ${intentData.intent}, Location: ${intentData.location || 'none'}`);
+
+    // Step 2: Search database if needed
+    let searchResults = { count: 0, posts: [] };
+    if (['search', 'follow_up', 'clarification'].includes(intentData.intent)) {
+      const searchLocation = intentData.location || context.lastLocation;
+      if (searchLocation) {
+        searchResults = await searchListings({
+          location: searchLocation,
+          propertyType: intentData.propertyType,
+          priceRange: intentData.priceRange,
+          bedrooms: intentData.bedrooms,
+          action: intentData.action
+        });
+        console.log(`[${sid}] Found ${searchResults.count} listings`);
+      }
+    }
+
+    // Step 3: Generate response with full context
+    const responseData = await generateResponse(message, context, sid, searchResults, intentData);
+    
+    // Add AI response to history
+    context.history.push({ role: 'model', content: responseData.reply });
+    
+    // Update session context
+    updateSessionContext(sid, {
+      lastIntent: intentData.intent,
+      lastLocation: intentData.location || context.lastLocation
+    });
+
+    // Return response with session ID
+    res.status(200).json({
+      ...responseData,
+      sessionId: sid
+    });
 
   } catch (err) {
     console.error("Assistant Error:", err);
     
-    // Graceful fallback
     res.status(200).json({
-      reply: "I'm here to help you find your perfect property! You can ask me about listings in any city, get real estate advice, or search for specific property types. What would you like to know?",
+      reply: "I'm having a moment! Let's try that again. What kind of property are you looking for?",
       searchUrl: null,
-      error: process.env.NODE_ENV === 'development' ? err.message : undefined
+      sessionId: sid,
+      suggestions: ["Apartments in Lagos", "Houses for rent", "Properties under ₦5M"]
     });
   }
+};
+
+// ============================================
+// SESSION MANAGEMENT ENDPOINTS
+// ============================================
+
+export const clearSession = async (req, res) => {
+  const { sessionId } = req.body;
+  
+  if (sessionId && conversationSessions.has(sessionId)) {
+    conversationSessions.delete(sessionId);
+  }
+  
+  res.status(200).json({ 
+    reply: "Session cleared. How can I help you today?",
+    sessionId: null
+  });
+};
+
+export const getSessionInfo = async (req, res) => {
+  const { sessionId } = req.params;
+  
+  if (!sessionId || !conversationSessions.has(sessionId)) {
+    return res.status(404).json({ error: "Session not found" });
+  }
+  
+  const session = conversationSessions.get(sessionId);
+  res.status(200).json({
+    createdAt: session.createdAt,
+    lastActivity: session.lastActivity,
+    messageCount: session.history.length,
+    preferences: session.preferences
+  });
 };
