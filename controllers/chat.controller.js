@@ -76,29 +76,68 @@ export const addChat = async (req, res) => {
   const tokenUserId = req.userId;
   const { receiverId } = req.body;
 
+  // Validate input
+  if (!receiverId) {
+    return res.status(400).json({ message: "Receiver ID is required!" });
+  }
+
+  // Prevent chatting with yourself
+  if (tokenUserId === receiverId) {
+    return res.status(400).json({ message: "Cannot create chat with yourself!" });
+  }
+
   try {
-    // FIXED: Changed 'all' to 'hasEvery' for Prisma/MongoDB array matching
+    // Sort user IDs to ensure consistent ordering (prevents race conditions)
+    const sortedUserIds = [tokenUserId, receiverId].sort();
+    
+    // Check for existing chat with both users
     const existingChat = await prisma.chat.findFirst({
       where: {
-        userIDs: {
-          hasEvery: [tokenUserId, receiverId],
+        AND: [
+          { userIDs: { has: sortedUserIds[0] } },
+          { userIDs: { has: sortedUserIds[1] } },
+        ],
+      },
+      include: {
+        messages: {
+          orderBy: { createdAt: 'desc' },
+          take: 1,
         },
       },
     });
 
     if (existingChat) {
+      // Return existing chat instead of creating duplicate
       return res.status(200).json(existingChat);
     }
 
+    // Create new chat with sorted user IDs for consistency
     const newChat = await prisma.chat.create({
       data: {
-        userIDs: [tokenUserId, receiverId],
+        userIDs: sortedUserIds,
+        seenBy: [tokenUserId], // Creator has seen it
       },
     });
-    res.status(200).json(newChat);
+    
+    res.status(201).json(newChat);
   } catch (err) {
     console.log(err);
-    res.status(500).json({ message: "Failed to add chat!" });
+    
+    // Handle potential race condition (unique constraint violation)
+    if (err.code === 'P2002') {
+      // Fetch the chat that was just created by concurrent request
+      const existingChat = await prisma.chat.findFirst({
+        where: {
+          AND: [
+            { userIDs: { has: tokenUserId } },
+            { userIDs: { has: receiverId } },
+          ],
+        },
+      });
+      return res.status(200).json(existingChat);
+    }
+    
+    res.status(500).json({ message: "Failed to create chat!" });
   }
 };
 

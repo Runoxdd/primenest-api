@@ -1,11 +1,10 @@
-import { GoogleGenAI } from "@google/genai";
 import Groq from "groq-sdk";
 import dotenv from "dotenv";
 import prisma from "../lib/prisma.js";
 
 dotenv.config();
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+// Using Groq exclusively - much more generous free tier (14M tokens/month)
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 // ============================================
@@ -234,24 +233,17 @@ const searchListings = async (filters) => {
 };
 
 // ============================================
-// RESPONSE GENERATION
+// RESPONSE GENERATION (Using Groq)
 // ============================================
 
 const generateResponse = async (message, context, sessionId, searchResults, intentData) => {
-  // Build conversation history for context
+  // Build conversation history for Groq (convert 'model' role to 'assistant')
   const conversationHistory = context.history.map(m => ({
-    role: m.role,
-    parts: [{ text: m.content }]
+    role: m.role === 'model' ? 'assistant' : m.role,
+    content: m.content
   }));
   
-  // Add current message
-  conversationHistory.push({
-    role: 'user',
-    parts: [{ text: message }]
-  });
-  
-  const systemInstruction = `
-You are "Runo," PrimeNest's expert AI real estate consultant. You are the pride and joy of the website - professional, knowledgeable, and genuinely helpful.
+  const systemInstruction = `You are "Runo," PrimeNest's expert AI real estate consultant. You are the pride and joy of the website - professional, knowledgeable, and genuinely helpful.
 
 PERSONALITY:
 - Warm and approachable, like a knowledgeable friend
@@ -291,7 +283,7 @@ RESPONSE GUIDELINES:
 
 Always end with a helpful follow-up question or suggestion to keep the conversation flowing naturally.
 
-RESPONSE FORMAT (JSON only):
+IMPORTANT: You must respond ONLY with valid JSON in this exact format, no other text:
 {
   "reply": "Your conversational response",
   "searchUrl": "/list?city=Location" or null,
@@ -302,29 +294,35 @@ RESPONSE FORMAT (JSON only):
     "bedrooms": number or null,
     "locations": ["location1", "location2"]
   }
-}
-`;
+}`;
 
   try {
-    const result = await retryWithBackoff(
-      () => ai.models.generateContent({
-        model: "gemini-2.0-flash",
-        contents: conversationHistory,
-        config: {
-          systemInstruction: systemInstruction,
-          temperature: 0.7,
-          maxOutputTokens: 800,
-        },
+    const completion = await retryWithBackoff(
+      () => groq.chat.completions.create({
+        messages: [
+          {
+            role: "system",
+            content: systemInstruction
+          },
+          ...conversationHistory,
+          {
+            role: "user",
+            content: message
+          }
+        ],
+        model: "llama-3.1-8b-instant",
+        temperature: 0.7,
+        max_tokens: 800,
+        response_format: { type: "json_object" }
       }),
       2,
       1000
     );
 
-    const responseText = result.text;
-    const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+    const responseText = completion.choices[0]?.message?.content || '{}';
     
-    if (jsonMatch) {
-      const parsedData = JSON.parse(jsonMatch[0]);
+    try {
+      const parsedData = JSON.parse(responseText);
       
       // Build search URL if applicable
       if (intentData.intent === 'search' && intentData.location) {
@@ -353,7 +351,19 @@ RESPONSE FORMAT (JSON only):
       }
       
       return parsedData;
-    } else {
+    } catch (parseErr) {
+      console.error("JSON parse error:", parseErr);
+      // Try to extract JSON from response
+      const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsedData = JSON.parse(jsonMatch[0]);
+        if (intentData.intent === 'search' && intentData.location) {
+          const params = new URLSearchParams();
+          params.set('city', intentData.location);
+          parsedData.searchUrl = `/list?${params.toString()}`;
+        }
+        return parsedData;
+      }
       throw new Error("Invalid response format");
     }
   } catch (err) {
