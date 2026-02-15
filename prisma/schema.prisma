@@ -17,10 +17,11 @@ model Post {
   id         String      @id @default(auto()) @map("_id") @db.ObjectId
   title      String
   price      Int
+  currency   String      @default("USD")
   images     String[]
   address    String
   city       String
-  country    String?     // <--- ADD THIS LINE
+  country    String?
   bedroom    Int
   bathroom   Int
   latitude   String

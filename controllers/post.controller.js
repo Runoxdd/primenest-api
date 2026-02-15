@@ -98,6 +98,7 @@ export const addPost = async (req, res) => {
     const newPost = await prisma.post.create({
       data: {
         ...body.postData,
+        currency: body.postData.currency || "USD", // Default to USD if not provided
         country: country, // Storing the detected country
         userId: tokenUserId,
         postDetail: {
@@ -112,13 +113,65 @@ export const addPost = async (req, res) => {
   }
 };
 
-// UPDATE POST (Placeholder)
+// UPDATE POST
 export const updatePost = async (req, res) => {
+  const id = req.params.id;
+  const tokenUserId = req.userId;
+  const body = req.body;
+
   try {
-    res.status(200).json();
+    // 1. Check if post exists and user is authorized
+    const existingPost = await prisma.post.findUnique({
+      where: { id },
+      include: { postDetail: true }
+    });
+
+    if (!existingPost) {
+      return res.status(404).json({ message: "Post not found!" });
+    }
+
+    if (existingPost.userId !== tokenUserId) {
+      return res.status(403).json({ message: "Not Authorized!" });
+    }
+
+    // 2. Update the post with postDetail
+    const updatedPost = await prisma.post.update({
+      where: { id },
+      data: {
+        title: body.postData.title,
+        price: parseInt(body.postData.price),
+        currency: body.postData.currency || existingPost.currency,
+        address: body.postData.address,
+        city: body.postData.city,
+        bedroom: parseInt(body.postData.bedroom),
+        bathroom: parseInt(body.postData.bathroom),
+        type: body.postData.type,
+        property: body.postData.property,
+        latitude: body.postData.latitude,
+        longitude: body.postData.longitude,
+        images: body.postData.images || existingPost.images,
+        postDetail: {
+          upsert: {
+            create: body.postDetail,
+            update: body.postDetail,
+          },
+        },
+      },
+      include: {
+        postDetail: true,
+        user: {
+          select: {
+            username: true,
+            avatar: true,
+          },
+        },
+      },
+    });
+
+    res.status(200).json(updatedPost);
   } catch (err) {
     console.log(err);
-    res.status(500).json({ message: "Failed to update posts" });
+    res.status(500).json({ message: "Failed to update post" });
   }
 };
 
