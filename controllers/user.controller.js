@@ -151,15 +151,20 @@ export const getNotificationNumber = async (req, res) => {
     res.status(200).json(number);
   } catch (err) {
     console.log(err);
-    res.status(500).json({ message: "Failed to get profile posts!" });
+    res.status(500).json({ message: "Failed to get notification number!" });
   }
 };
+
 export const adminMe = async (req, res) => {
   const tokenUserId = req.userId;
   try {
     const user = await prisma.user.findUnique({
       where: { id: tokenUserId },
     });
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found!" });
+    }
 
     if (user.username !== "Runo") {
       return res.status(403).json({ message: "Only Runo can become admin through this endpoint!" });

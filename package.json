@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "start": "node app.js",
-    "build": "npm install && npx prisma generate"
+    "build": "npm install && npx prisma db push && npx prisma generate"
   },
   "keywords": [],
   "author": "",
