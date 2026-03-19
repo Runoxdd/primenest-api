@@ -28,6 +28,8 @@ model Post {
   longitude  String
   type       Type
   property   Property
+  status     String      @default("active")
+  delistedBy String?
   createdAt  DateTime    @default(now())
   user       User        @relation(fields: [userId], references: [id])
   userId     String      @db.ObjectId
@@ -79,6 +81,8 @@ model User {
   username   String      @unique
   password   String
   avatar     String?
+  isAdmin    Boolean     @default(false)
+  isBanned   Boolean     @default(false)
   createdAt  DateTime    @default(now())
   posts      Post[]
   savedPosts SavedPost[]

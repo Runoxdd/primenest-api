@@ -34,7 +34,13 @@ export const login = async (req, res) => {
       where: { username },
     });
 
+    // CHECK IF THE USER IS BANNED
     if (!user) return res.status(400).json({ message: "Invalid Credentials!" });
+
+    // CHECK IF THE USER IS BANNED
+    if (user.isBanned) {
+      return res.status(403).json({ message: "Your account has been banned!" });
+    }
 
     // CHECK IF THE PASSWORD IS CORRECT
     const isPasswordValid = await bcrypt.compare(password, user.password);
@@ -48,7 +54,7 @@ export const login = async (req, res) => {
     const token = jwt.sign(
       {
         id: user.id,
-        isAdmin: false,
+        isAdmin: user.isAdmin,
       },
       process.env.JWT_SECRET_KEY,
       { expiresIn: age }
