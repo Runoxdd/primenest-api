@@ -6,7 +6,6 @@ import {
   updateUser,
   savePost,
   profilePosts,
-  profilePosts,
   getNotificationNumber,
   adminMe
 } from "../controllers/user.controller.js";
