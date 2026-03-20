@@ -22,6 +22,9 @@ export const getPosts = async (req, res) => {
           gte: parseInt(query.minPrice) || 0,
           lte: (parseInt(query.maxPrice) > 0) ? parseInt(query.maxPrice) : 100000000,
         },
+        NOT: {
+          status: "delisted"
+        },
       },
     });
 
@@ -52,9 +55,25 @@ export const getPost = async (req, res) => {
     if (!post) return res.status(404).json({ message: "Post not found" });
 
     const token = req.cookies?.token;
+    let payload = null;
+
     if (token) {
       try {
-        const payload = jwt.verify(token, process.env.JWT_SECRET_KEY);
+        payload = jwt.verify(token, process.env.JWT_SECRET_KEY);
+      } catch (err) {
+        // invalid token
+      }
+    }
+
+    // Security check: Block public access to delisted posts
+    if (post.status === "delisted") {
+      if (!payload || (payload.id !== post.userId && !payload.isAdmin)) {
+        return res.status(403).json({ message: "This post has been delisted by an administrator." });
+      }
+    }
+
+    if (payload) {
+      try {
         const saved = await prisma.savedPost.findUnique({
           where: {
             userId_postId: {
@@ -68,6 +87,7 @@ export const getPost = async (req, res) => {
         return res.status(200).json({ ...post, isSaved: false });
       }
     }
+
     return res.status(200).json({ ...post, isSaved: false });
   } catch (err) {
     console.log(err);
