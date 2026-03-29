@@ -40,7 +40,7 @@ const getSessionContext = (sessionId) => {
       const oldestKey = conversationSessions.keys().next().value;
       conversationSessions.delete(oldestKey);
     }
-    
+
     conversationSessions.set(sessionId, {
       history: [],
       lastIntent: null,
@@ -55,7 +55,7 @@ const getSessionContext = (sessionId) => {
       lastActivity: Date.now()
     });
   }
-  
+
   const session = conversationSessions.get(sessionId);
   session.lastActivity = Date.now();
   return session;
@@ -79,7 +79,7 @@ const updateSessionContext = (sessionId, updates) => {
 
 const retryWithBackoff = async (fn, maxRetries = 3, baseDelay = 1000) => {
   let lastError;
-  
+
   for (let i = 0; i < maxRetries; i++) {
     try {
       return await fn();
@@ -92,7 +92,7 @@ const retryWithBackoff = async (fn, maxRetries = 3, baseDelay = 1000) => {
       }
     }
   }
-  
+
   throw lastError;
 };
 
@@ -101,41 +101,49 @@ const retryWithBackoff = async (fn, maxRetries = 3, baseDelay = 1000) => {
 // ============================================
 
 const detectIntent = async (message, context) => {
-  const contextHint = context.lastLocation 
-    ? `Previous location mentioned: ${context.lastLocation}` 
+  const contextHint = context.lastLocation
+    ? `Previous location mentioned: ${context.lastLocation}`
     : '';
-  
+
   const intentCompletion = await groq.chat.completions.create({
     messages: [
       {
         role: "system",
-        content: `Analyze the user's real estate query with conversation context.
-        
+        content: `You are analyzing real estate queries for a Nigerian property platform.
+
 ${contextHint}
 
-Categorize the query and extract information. Respond in this EXACT JSON format:
+Extract intent and key filters. Return ONLY this JSON (no extra text):
 {
   "intent": "search|advice|greeting|follow_up|clarification",
-  "location": "city/country name or null",
-  "propertyType": "apartment|house|condo|land|any",
+  "location": "Nigerian city/area name or null",
+  "propertyType": "apartment|house|duplex|bungalow|land|commercial|any",
   "priceRange": {"min": number, "max": number} or null,
   "bedrooms": number or null,
   "action": "buy|rent|any"
 }
 
-Intent Types:
-- search: User wants to find properties
-- advice: User wants real estate advice/tips
-- greeting: User is saying hello/starting conversation
-- follow_up: User is asking about previous results
-- clarification: User is refining their search
+INTENT RULES:
+- search: user wants to find/see properties
+- advice: user wants tips, market info, or real estate guidance
+- greeting: user is saying hello or starting fresh
+- follow_up: user references previous results ("what about those?", "show more")
+- clarification: user is narrowing/refining a previous search
+
+NIGERIAN CONTEXT — recognize these locations and local terms:
+- Cities: Lagos, Abuja, Port Harcourt, Ibadan, Kano, Enugu, Benin City, Warri, Owerri, Uyo, Kaduna, Jos
+- Lagos zones: Lekki, Victoria Island (VI), Ikoyi, Ajah, Surulere, Yaba, Ikeja, Magodo, Ojodu, Ikorodu, Badagry, Sangotedo
+- Abuja zones: Maitama, Wuse, Asokoro, Gwarinpa, Jabi, Garki, Apo, Kubwa, Life Camp, Katampe
+- PH zones: GRA, Trans Amadi, Old GRA, Rumuola
+- Nigerian property terms: "self-con" = studio/self-contained, "face-me-I-face-you" = shared compound, "mini flat" = 1-bed, "boys quarter" = BQ/servant quarters
+- Price clues: "million" or "m" = x1,000,000 naira. "k" = x1,000 naira
 
 Examples:
-- "houses in Japan" → {"intent":"search","location":"Japan","propertyType":"house",...}
-- "apartments for rent in Lagos under 5 million" → {"intent":"search","location":"Lagos","propertyType":"apartment","priceRange":{"min":0,"max":5000000},"action":"rent"}
-- "show me more" → {"intent":"follow_up",...}
-- "what about 2 bedrooms?" → {"intent":"clarification","bedrooms":2,...}
-- "hello" → {"intent":"greeting",...}`
+- "2 bedroom flat in Lekki for rent" → intent:search, location:Lekki, propertyType:apartment, bedrooms:2, action:rent
+- "self con in Yaba under 500k" → intent:search, location:Yaba, propertyType:apartment, priceRange:{min:0,max:500000}, action:rent
+- "houses in Maitama under 150 million" → intent:search, location:Maitama, propertyType:house, priceRange:{min:0,max:150000000}, action:buy
+- "what about 3 bedrooms?" → intent:clarification, bedrooms:3
+- "show me more" → intent:follow_up`
       },
       { role: "user", content: message }
     ],
@@ -166,12 +174,12 @@ Examples:
 
 const searchListings = async (filters) => {
   const { location, propertyType, priceRange, bedrooms, action } = filters;
-  
+
   try {
     await prisma.$connect();
-    
+
     const where = { AND: [] };
-    
+
     // Location filter
     if (location) {
       where.AND.push({
@@ -182,12 +190,12 @@ const searchListings = async (filters) => {
         ]
       });
     }
-    
+
     // Property type filter
     if (propertyType && propertyType !== 'any') {
       where.AND.push({ property: propertyType });
     }
-    
+
     // Price range filter
     if (priceRange) {
       const priceCondition = {};
@@ -197,23 +205,23 @@ const searchListings = async (filters) => {
         where.AND.push({ price: priceCondition });
       }
     }
-    
+
     // Bedrooms filter
     if (bedrooms) {
       where.AND.push({ bedroom: { gte: bedrooms } });
     }
-    
+
     // Action (buy/rent) filter
     if (action && action !== 'any') {
       where.AND.push({ type: action });
     }
-    
+
     const posts = await prisma.post.findMany({
       where: where.AND.length > 0 ? where : undefined,
-      select: { 
-        id: true, 
-        title: true, 
-        city: true, 
+      select: {
+        id: true,
+        title: true,
+        city: true,
         country: true,
         price: true,
         bedroom: true,
@@ -242,57 +250,76 @@ const generateResponse = async (message, context, sessionId, searchResults, inte
     role: m.role === 'model' ? 'assistant' : m.role,
     content: m.content
   }));
-  
-  const systemInstruction = `You are "Runo," PrimeNest's expert AI real estate consultant. You are the pride and joy of the website - professional, knowledgeable, and genuinely helpful.
+
+  const systemInstruction = `You are Runo, PrimeNest's AI real estate consultant for Nigeria. You are sharp, warm, and genuinely useful — like a knowledgeable friend who knows the Nigerian property market inside out.
+
+IDENTITY RULE (CRITICAL):
+- Only introduce yourself by name at the very start of a brand-new session (when intent is "greeting" and there is no conversation history).
+- NEVER say "I'm Runo" or "As Runo" or reference your name in any other message. Just talk naturally.
 
 PERSONALITY:
-- Warm and approachable, like a knowledgeable friend
-- Expert in real estate markets, trends, and advice
-- Proactive in understanding user needs
-- Remember conversation context and build on it
-- Concise but thorough (aim for 2-3 sentences unless more detail is needed)
+- Direct and confident, but never cold
+- Use natural Nigerian-flavored English where it fits (not forced)
+- Proactive: anticipate what the user needs next
+- Keep replies concise — 2-4 sentences max unless giving detailed advice
+- Avoid generic filler phrases like "Great question!" or "Certainly!"
 
-CURRENT CONTEXT:
-- Session ID: ${sessionId}
-- Previous Intent: ${context.lastIntent || 'None'}
-- Previous Location: ${context.lastLocation || 'None'}
-- User Preferences: ${JSON.stringify(context.preferences)}
-- Current Intent: ${intentData.intent}
-- Detected Location: ${intentData.location || 'Not specified'}
-- Property Type: ${intentData.propertyType}
-- Search Results Found: ${searchResults.count}
+NIGERIAN MARKET KNOWLEDGE — use this to give smart, grounded responses:
+- Lagos pricing: Self-con (studio) in Yaba/Surulere: ₦200k–₦600k/yr. 2-bed in Lekki Phase 1: ₦1.5M–₦4M/yr rent. 3-bed for sale in Lekki/VI: ₦80M–₦300M+
+- Abuja pricing: 2-bed in Gwarinpa: ₦700k–₦1.5M/yr rent. 3-bed in Maitama/Asokoro for sale: ₦100M–₦500M+
+- Port Harcourt: GRA 3-bed: ₦1.5M–₦3M/yr rent
+- Neighborhoods: Lekki/VI/Ikoyi = premium Lagos. Surulere/Yaba/Ikeja = mid-range. Ikorodu/Badagry = affordable. Maitama/Asokoro = premium Abuja. Gwarinpa/Kubwa = mid-range Abuja
+- Always quote prices in Naira (₦). NEVER mention dollars, pounds, or any other currency.
+- Common tradeoffs: Mainland Lagos = cheaper + traffic. Island Lagos = pricier + convenience. Abuja = more orderly, higher land costs.
 
-SEARCH RESULTS:
-${searchResults.count > 0 ? 
-  searchResults.posts.map((p, i) => `${i + 1}. ${p.title} - ${p.city}, ${p.country} (${p.bedroom} bed, ${p.bathroom} bath) - ${p.type === 'rent' ? 'Rent' : 'Sale'}`).join('\n') 
-  : 'No listings found matching criteria'}
+CURRENT SESSION CONTEXT:
+- Previous intent: ${context.lastIntent || 'None'}
+- Previous location: ${context.lastLocation || 'None'}
+- User preferences so far: ${JSON.stringify(context.preferences)}
 
-RESPONSE GUIDELINES:
+CURRENT REQUEST:
+- Intent: ${intentData.intent}
+- Detected location: ${intentData.location || 'Not specified'}
+- Property type: ${intentData.propertyType}
+- Listings found: ${searchResults.count}
 
-1. GREETING: Be warm and inviting. Introduce yourself briefly and ask how you can help.
+LISTINGS DATA:
+${searchResults.count > 0
+      ? searchResults.posts.map((p, i) =>
+        `${i + 1}. ${p.title} — ${p.city} | ${p.bedroom} bed, ${p.bathroom} bath | ${p.type === 'rent' ? 'Rent' : 'For sale'} | ₦${p.price?.toLocaleString()}`
+      ).join('\n')
+      : 'No listings matched the search criteria'}
 
-2. ADVICE: Share helpful real estate insights. Be specific and actionable.
+RESPONSE RULES BY INTENT:
 
-3. SEARCH with results: Celebrate finding options! Mention the count and highlight 1-2 interesting properties.
+GREETING (first message only): Introduce yourself once, briefly. Ask what they're looking for in a natural, inviting way.
 
-4. SEARCH without results: Be empathetic. Suggest alternatives or ask clarifying questions.
+SEARCH with results: Lead with a confident summary ("Found X options in [area]"). Highlight 1–2 standout listings with a quick note on why they're worth looking at. Suggest a next step.
 
-5. FOLLOW_UP: Reference previous conversation naturally. "Looking at those ${context.lastLocation} properties again..."
+SEARCH with no results: Be direct about it. Offer a smart alternative — nearby area, adjusted price range, or different property type — based on your Nigerian market knowledge.
 
-6. CLARIFICATION: Acknowledge the refinement and show updated results.
+FOLLOW_UP: Reference the previous search naturally ("Still looking at [location] — here's what else came up..."). Don't re-introduce yourself.
 
-Always end with a helpful follow-up question or suggestion to keep the conversation flowing naturally.
+CLARIFICATION: Acknowledge the refinement briefly and show what changed in the results.
 
-IMPORTANT: You must respond ONLY with valid JSON in this exact format, no other text:
+ADVICE: Give concrete, Nigeria-specific insights. Mention real neighborhoods, realistic price expectations, and practical tips (e.g. "Always inspect before paying, ask about service charge in estate properties").
+
+SMART RECOMMENDATIONS — always close with ONE genuinely useful next step:
+- If they searched an expensive area: suggest a nearby affordable alternative
+- If few results: suggest loosening one filter (e.g. bedroom count)
+- If lots of results: suggest a filter to narrow down (e.g. price band or specific zone)
+- If they seem to be browsing: ask a pointed question to understand their priority (budget? proximity to work? school?)
+
+RESPOND ONLY with this JSON, nothing outside it:
 {
-  "reply": "Your conversational response",
+  "reply": "Your natural, conversational response",
   "searchUrl": "/list?city=Location" or null,
-  "suggestions": ["suggestion 1", "suggestion 2"],
+  "suggestions": ["one short, specific follow-up prompt", "another one"],
   "preferences": {
     "propertyType": "updated type or null",
     "priceRange": {"min": number, "max": number} or null,
     "bedrooms": number or null,
-    "locations": ["location1", "location2"]
+    "locations": ["location1"]
   }
 }`;
 
@@ -320,10 +347,10 @@ IMPORTANT: You must respond ONLY with valid JSON in this exact format, no other 
     );
 
     const responseText = completion.choices[0]?.message?.content || '{}';
-    
+
     try {
       const parsedData = JSON.parse(responseText);
-      
+
       // Build search URL if applicable
       if (intentData.intent === 'search' && intentData.location) {
         const params = new URLSearchParams();
@@ -340,7 +367,7 @@ IMPORTANT: You must respond ONLY with valid JSON in this exact format, no other 
         }
         parsedData.searchUrl = `/list?${params.toString()}`;
       }
-      
+
       // Update session with AI-extracted preferences
       if (parsedData.preferences) {
         const session = getSessionContext(sessionId);
@@ -349,7 +376,7 @@ IMPORTANT: You must respond ONLY with valid JSON in this exact format, no other 
           session.preferences.locations.push(intentData.location);
         }
       }
-      
+
       return parsedData;
     } catch (parseErr) {
       console.error("JSON parse error:", parseErr);
@@ -369,9 +396,9 @@ IMPORTANT: You must respond ONLY with valid JSON in this exact format, no other 
   } catch (err) {
     console.error("Response generation error:", err);
     return {
-      reply: "I'm here to help you find your perfect property! Could you tell me more about what you're looking for?",
+      reply: "I'm having a moment! Let's try that again. What kind of property are you looking for?",
       searchUrl: null,
-      suggestions: ["Show me apartments in Lagos", "Find houses under ₦5M", "2 bedroom flats for rent"]
+      suggestions: ["2 bedroom flat in Lekki", "Houses for rent in Abuja", "Apartments under ₦1M in Lagos"]
     };
   }
 };
@@ -396,17 +423,17 @@ export const chatWithAssistant = async (req, res) => {
   try {
     // Get or create session context
     const context = getSessionContext(sid);
-    
+
     // Add user message to history
     context.history.push({ role: 'user', content: message });
-    
+
     // Step 1: Detect intent with context
     const intentData = await retryWithBackoff(
       () => detectIntent(message, context),
       3,
       500
     );
-    
+
     console.log(`[${sid}] Intent: ${intentData.intent}, Location: ${intentData.location || 'none'}`);
 
     // Step 2: Search database if needed
@@ -427,10 +454,10 @@ export const chatWithAssistant = async (req, res) => {
 
     // Step 3: Generate response with full context
     const responseData = await generateResponse(message, context, sid, searchResults, intentData);
-    
+
     // Add AI response to history
     context.history.push({ role: 'model', content: responseData.reply });
-    
+
     // Update session context
     updateSessionContext(sid, {
       lastIntent: intentData.intent,
@@ -445,12 +472,12 @@ export const chatWithAssistant = async (req, res) => {
 
   } catch (err) {
     console.error("Assistant Error:", err);
-    
+
     res.status(200).json({
       reply: "I'm having a moment! Let's try that again. What kind of property are you looking for?",
       searchUrl: null,
       sessionId: sid,
-      suggestions: ["Apartments in Lagos", "Houses for rent", "Properties under ₦5M"]
+      suggestions: ["2 bedroom flat in Lekki", "Houses for rent in Abuja", "Apartments under ₦1M in Lagos"]
     });
   }
 };
@@ -461,12 +488,12 @@ export const chatWithAssistant = async (req, res) => {
 
 export const clearSession = async (req, res) => {
   const { sessionId } = req.body;
-  
+
   if (sessionId && conversationSessions.has(sessionId)) {
     conversationSessions.delete(sessionId);
   }
-  
-  res.status(200).json({ 
+
+  res.status(200).json({
     reply: "Session cleared. How can I help you today?",
     sessionId: null
   });
@@ -474,11 +501,11 @@ export const clearSession = async (req, res) => {
 
 export const getSessionInfo = async (req, res) => {
   const { sessionId } = req.params;
-  
+
   if (!sessionId || !conversationSessions.has(sessionId)) {
     return res.status(404).json({ error: "Session not found" });
   }
-  
+
   const session = conversationSessions.get(sessionId);
   res.status(200).json({
     createdAt: session.createdAt,
