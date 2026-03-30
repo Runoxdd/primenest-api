@@ -199,8 +199,6 @@ const getMissingFields = (collected) => {
   if (!collected.location) missing.push('location');
   if (!collected.action) missing.push('action');
   if (!collected.propertyType) missing.push('propertyType');
-  const needsBedrooms = collected.propertyType !== 'land' && collected.propertyType !== 'commercial';
-  if (needsBedrooms && !collected.bedrooms) missing.push('bedrooms');
   return missing;
 };
 
