@@ -20,6 +20,12 @@ export const register = async (req, res) => {
 
     res.status(201).json({ message: "User created successfully" });
   } catch (err) {
+    // Prisma unique-constraint violation: username or email already taken
+    if (err?.code === "P2002") {
+      const field = [].concat(err.meta?.target ?? []).join(" ") || "";
+      const taken = field.includes("email") ? "Email" : field.includes("username") ? "Username" : "Username or email";
+      return res.status(409).json({ message: `${taken} is already in use!` });
+    }
     console.log(err);
     res.status(500).json({ message: "Failed to create user!" });
   }
